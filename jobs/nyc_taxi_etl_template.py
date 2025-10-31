@@ -17,7 +17,7 @@ import argparse
 import os
 import base64
 from typing import List, Dict
-from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
+from pyspark.sql import SparkSession, DataFrame, functions as F, types as T, Window
 
 def build_spark(app_name: str, shuffle_partitions: int = 200) -> SparkSession:
     spark = (
@@ -30,11 +30,13 @@ def build_spark(app_name: str, shuffle_partitions: int = 200) -> SparkSession:
 
 def read_trips(spark: SparkSession, input_paths: List[str]) -> DataFrame:
     # TODO: Read multiple Parquet files, e.g., spark.read.parquet(*input_paths)
-    raise NotImplementedError
+    df = spark.read.parquet(*input_paths)
+    return df
 
 def read_zones(spark: SparkSession, zone_csv: str) -> DataFrame:
     # TODO: Read CSV with header=True, inferSchema=True
-    raise NotImplementedError
+    df = spark.read.csv(zone_csv, header=True, inferSchema=True)
+    return df
 
 def clean_and_transform(df: DataFrame) -> DataFrame:
     """
@@ -51,7 +53,17 @@ def clean_and_transform(df: DataFrame) -> DataFrame:
       * vendor_name (1->'Creative', 2->'VeriFone', else id string or 'Unknown')
     """
     # TODO
-    raise NotImplementedError
+    df = df.withColumn("pickup_date", F.to_date("tpep_pickup_datetime")) \
+           .withColumn("pickup_hour", F.hour("tpep_pickup_datetime")) \
+           .withColumn("week_of_year", F.weekofyear("tpep_pickup_datetime")) \
+           .withColumn("vendor_name", F.when(F.col("VendorID") == 1, "Creative")
+                                 .when(F.col("VendorID") == 2, "VeriFone")
+                                 .when(F.col("VendorID").isNotNull(), F.col("VendorID").cast(T.StringType()))
+                                 .otherwise("Unknown"))
+    df = df.filter((F.col("passenger_count") > 0) &
+                   (F.col("trip_distance") > 0) &
+                   (F.col("fare_amount") >= 0))
+    return df
 
 def join_zones(df: DataFrame, zones: DataFrame) -> DataFrame:
     """
@@ -60,27 +72,42 @@ def join_zones(df: DataFrame, zones: DataFrame) -> DataFrame:
     - Consider broadcasting zones (small table)
     """
     # TODO
-    raise NotImplementedError
+    zones_broadcast = F.broadcast(zones)
+    df_enriched = df.join(zones_broadcast.withColumnRenamed("LocationID", "PULocationID")
+                          .withColumnRenamed("Borough", "PU_Borough")
+                          .withColumnRenamed("Zone", "PU_Zone"),
+                          on="PULocationID", how="left")
+    df_enriched = df_enriched.join(zones_broadcast.withColumnRenamed("LocationID", "DOLocationID")
+                                   .withColumnRenamed("Borough", "DO_Borough")
+                                   .withColumnRenamed("Zone", "DO_Zone"),
+                                   on="DOLocationID", how="left")
+    return df_enriched
 
 def agg_hourly_pickups(df_enriched: DataFrame) -> DataFrame:
     # TODO: group by pickup_date, pickup_hour, PU_Zone (or PU_Borough) and count
-    raise NotImplementedError
+    df_agg = df_enriched.groupBy("pickup_date", "pickup_hour", "PU_Zone").count()
+    return df_agg
 
 def agg_top10_zones_daily(df_enriched: DataFrame) -> DataFrame:
     # TODO: daily top 10 zones by trips with rank
-    raise NotImplementedError
+    df_agg = df_enriched.groupBy("pickup_date", "PU_Zone").count()
+    df_agg = df_agg.withColumn("rank", F.row_number().over(Window.partitionBy("pickup_date").orderBy(F.desc("count"))))
+    df_agg = df_agg.filter(F.col("rank") <= 10)
+    return df_agg
 
 def agg_weekly_revenue_per_vendor(df_enriched: DataFrame) -> DataFrame:
     # TODO: sum total_amount by vendor_name and week_of_year
-    raise NotImplementedError
+    df_agg = df_enriched.groupBy("week_of_year", "vendor_name").agg(F.sum("total_amount").alias("weekly_revenue"))
+    return df_agg
 
 def write_curated(df_enriched: DataFrame, out_path: str):
     # TODO: write partitioned by pickup_date as parquet (mode overwrite or append)
-    raise NotImplementedError
+    df_enriched.write.partitionBy("pickup_date").mode("overwrite").parquet(out_path)
 
 def write_aggregates_local(dfs: Dict[str, DataFrame], out_root: str):
     # TODO: write each df as parquet under out_root/<name>
-    raise NotImplementedError
+    for name, df in dfs.items():
+        df.write.mode("overwrite").parquet(f"{out_root}/{name}")
 
 def _decode_pem_from_b64(b64_str: str) -> str:
     if not b64_str:
